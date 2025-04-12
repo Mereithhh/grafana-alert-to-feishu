@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
 from collections import defaultdict
 
@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 # 从环境变量获取飞书Webhook URL，如果没有则使用默认值
 FEISHU_WEBHOOK_URL = os.environ.get('FEISHU_WEBHOOK_URL', 'https://open.feishu.cn/open-apis/bot/v2/hook/15822684-b440-4129-884c-58045f3e91f7')
 
+# 时区设置（默认为东八区 UTC+8），可通过环境变量 TIMEZONE_OFFSET 配置
+TIMEZONE_OFFSET = int(os.environ.get('TIMEZONE_OFFSET', 8))
+TIMEZONE = timezone(timedelta(hours=TIMEZONE_OFFSET))
+
 # 告警状态对应的颜色
 ALERT_COLORS = {
     "firing": "red",
@@ -22,16 +26,34 @@ ALERT_COLORS = {
 }
 
 def format_time(time_str):
-    """格式化时间为更易读的格式"""
+    """格式化时间为更易读的格式，并转换为本地时区"""
+    if not time_str:
+        return "未知"
+        
     try:
+        # 尝试解析带毫秒的格式
         dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        # 设置为UTC时区
+        dt = dt.replace(tzinfo=timezone.utc)
+        # 转换到本地时区
+        local_dt = dt.astimezone(TIMEZONE)
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S")
     except:
         try:
+            # 尝试解析不带毫秒的格式
             dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%SZ")
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
+            # 设置为UTC时区
+            dt = dt.replace(tzinfo=timezone.utc)
+            # 转换到本地时区
+            local_dt = dt.astimezone(TIMEZONE)
+            return local_dt.strftime("%Y-%m-%d %H:%M:%S")
         except:
+            # 如果无法解析，则原样返回
             return time_str
+
+def get_current_time():
+    """获取当前本地时间"""
+    return datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -146,7 +168,16 @@ def create_feishu_card(status, title, alerts, alert_data):
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": f"{status_text}\n**告警时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            "content": f"{status_text}\n**告警时间**: {get_current_time()}"
+        }
+    })
+    
+    # 添加时区信息
+    card["elements"].append({
+        "tag": "div",
+        "text": {
+            "tag": "lark_md",
+            "content": f"**时区**: UTC{'+' if TIMEZONE_OFFSET >= 0 else ''}{TIMEZONE_OFFSET}"
         }
     })
     
@@ -235,7 +266,7 @@ def create_feishu_card(status, title, alerts, alert_data):
         
         # 添加时间范围
         earliest_start = min([a.get('startsAt', '') for a in alert_group if a.get('startsAt')])
-        start_time = format_time(earliest_start) if earliest_start else ''
+        start_time = format_time(earliest_start) if earliest_start else '未知'
             
         card["elements"].append({
             "tag": "div",
