@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime
 from flask import Flask, request, jsonify
+from collections import defaultdict
 
 app = Flask(__name__)
 
@@ -104,9 +105,20 @@ def is_valid_url(url):
     # 简单检查是否是一个网址格式
     return url.startswith(('http://', 'https://'))
 
+def group_alerts_by_name(alerts):
+    """按告警名称分组告警"""
+    grouped = defaultdict(list)
+    for alert in alerts:
+        alert_name = alert.get('labels', {}).get('alertname', '未知告警')
+        grouped[alert_name].append(alert)
+    return grouped
+
 def create_feishu_card(status, title, alerts, alert_data):
     """创建飞书卡片"""
     status_color = ALERT_COLORS.get(status.lower(), "grey")
+    
+    # 按告警名称分组告警
+    grouped_alerts = group_alerts_by_name(alerts)
     
     card = {
         "header": {
@@ -120,25 +132,39 @@ def create_feishu_card(status, title, alerts, alert_data):
     }
     
     # 添加总体摘要
+    firing_count = sum(1 for alert in alerts if alert.get('status') == 'firing')
+    resolved_count = sum(1 for alert in alerts if alert.get('status') == 'resolved')
+    status_summary = []
+    if firing_count > 0:
+        status_summary.append(f"**告警中**: {firing_count}个")
+    if resolved_count > 0:
+        status_summary.append(f"**已恢复**: {resolved_count}个")
+    
+    status_text = "\n".join(status_summary) if status_summary else f"**状态**: {status}"
+    
     card["elements"].append({
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": f"**状态**: {status}\n**告警时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            "content": f"{status_text}\n**告警时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         }
     })
     
     # 添加分割线
     card["elements"].append({"tag": "hr"})
     
-    # 处理每个告警
-    for i, alert in enumerate(alerts):
-        alert_status = alert.get('status', '未知')
-        alert_labels = alert.get('labels', {})
-        alert_annotations = alert.get('annotations', {})
+    # 处理分组后的每个告警类型
+    for i, (alert_name, alert_group) in enumerate(grouped_alerts.items()):
+        first_alert = alert_group[0]
+        alert_annotations = first_alert.get('annotations', {})
         
-        # 获取实例信息
-        instance_info = get_instance_info(alert_labels)
+        # 统计该组中的状态数量
+        group_firing = sum(1 for a in alert_group if a.get('status') == 'firing')
+        group_resolved = sum(1 for a in alert_group if a.get('status') == 'resolved')
+        
+        # 获取该组中的所有实例，用逗号分隔
+        instance_list = [get_instance_info(a.get('labels', {})) for a in alert_group]
+        instance_text = ", ".join(instance_list)
         
         # 告警基本信息
         card["elements"].append({
@@ -148,18 +174,38 @@ def create_feishu_card(status, title, alerts, alert_data):
                     "is_short": True,
                     "text": {
                         "tag": "lark_md",
-                        "content": f"**告警名称**\n{alert_labels.get('alertname', '未知')}"
+                        "content": f"**告警名称**\n{alert_name}"
                     }
                 },
                 {
                     "is_short": True,
                     "text": {
                         "tag": "lark_md",
-                        "content": f"**实例**\n{instance_info}"
+                        "content": f"**状态**\n{'🔥 告警中' if group_firing > 0 else '✅ 已恢复'}"
                     }
                 }
             ]
         })
+        
+        # 添加实例信息
+        if len(instance_list) <= 3:
+            # 实例较少时，直接显示全部
+            card["elements"].append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**实例**: {instance_text}"
+                }
+            })
+        else:
+            # 实例较多时，显示数量和部分示例
+            card["elements"].append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**实例**: 共{len(instance_list)}个，包括: {', '.join(instance_list[:3])}..."
+                }
+            })
         
         # 添加告警描述和摘要
         if 'description' in alert_annotations or 'summary' in alert_annotations:
@@ -177,40 +223,35 @@ def create_feishu_card(status, title, alerts, alert_data):
                 }
             })
         
-        # 添加值信息（如果有）
-        if 'valueString' in alert:
+        # 添加值信息（如果第一条告警有）
+        if 'valueString' in first_alert:
             card["elements"].append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**值**: {alert.get('valueString', '')}"
+                    "content": f"**值**: {first_alert.get('valueString', '')}"
                 }
             })
         
         # 添加时间范围
-        start_time = format_time(alert.get('startsAt', ''))
-        end_time = alert.get('endsAt', '')
-        if end_time and end_time != "0001-01-01T00:00:00Z":
-            end_time = format_time(end_time)
-            time_range = f"**开始时间**: {start_time}\n**结束时间**: {end_time}"
-        else:
-            time_range = f"**开始时间**: {start_time}"
+        earliest_start = min([a.get('startsAt', '') for a in alert_group if a.get('startsAt')])
+        start_time = format_time(earliest_start) if earliest_start else ''
             
         card["elements"].append({
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": time_range
+                "content": f"**开始时间**: {start_time}"
             }
         })
         
         # 添加仪表盘和面板链接
         links = []
         
-        dashboard_url = alert.get('dashboardURL', '')
-        panel_url = alert.get('panelURL', '')
-        silence_url = alert.get('silenceURL', '')
-        generator_url = alert.get('generatorURL', '')
+        dashboard_url = first_alert.get('dashboardURL', '')
+        panel_url = first_alert.get('panelURL', '')
+        silence_url = first_alert.get('silenceURL', '')
+        generator_url = first_alert.get('generatorURL', '')
         
         # 只添加有效的链接
         if is_valid_url(dashboard_url):
@@ -264,8 +305,8 @@ def create_feishu_card(status, title, alerts, alert_data):
                 "actions": links
             })
         
-        # 如果不是最后一个告警，添加分割线
-        if i < len(alerts) - 1:
+        # 如果不是最后一个告警类型，添加分割线
+        if i < len(grouped_alerts) - 1:
             card["elements"].append({"tag": "hr"})
     
     # 添加额外的指纹信息
