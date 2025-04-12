@@ -81,8 +81,59 @@ docker run -p 5000:5000 -e FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/
 
 1. 在Grafana中，进入`Alerting` > `Contact points`
 2. 添加一个新的联系人点，类型选择`Webhook`
-3. URL填写你的服务地址，例如`http://your-server:5000/webhook`
+3. URL填写你的服务地址，例如`http://your-server:5022/webhook`
 4. 保存后在通知策略中使用此联系人点
+
+### 解决实例显示为"未知"的问题
+
+如果你发现飞书消息卡片中实例信息显示为"未知"，请按照以下步骤配置 Grafana：
+
+1. 确保告警规则包含 `instance` 标签
+   - 对于 Prometheus 数据源，可以在告警查询中使用包含 `instance` 标签的指标
+   - 如果使用其他数据源，需要在告警规则中手动添加 `instance` 标签
+
+2. 配置 Contact Point (联系人点) 中的自定义消息模板
+   - 进入 `Alerting` > `Contact points` > 编辑你的联系人点
+   - 展开 `Optional Webhook settings`
+   - 在 `Message` 字段中添加以下 JSON 模板（确保包含 `instance` 标签）:
+
+```json
+{
+  "alerts": {{ $ava := .Alerts.Firing }}{{ if not $ava }}{{ $ava = .Alerts.Resolved }}{{ end }}
+  [
+  {{ range $index, $alert := $ava }}
+    {{- if $index }}, {{ end }}
+    {
+      "status": "{{ .Status }}",
+      "labels": {
+        "alertname": "{{ .Labels.alertname }}",
+        "instance": "{{ if .Labels.instance }}{{ .Labels.instance }}{{ else }}{{ index .Labels \"node\" }}{{ end }}",
+        "severity": "{{ .Labels.severity }}",
+        "job": "{{ .Labels.job }}"
+      },
+      "annotations": {
+        "description": "{{ .Annotations.description }}",
+        "summary": "{{ .Annotations.summary }}"
+      },
+      "startsAt": "{{ .StartsAt }}",
+      "endsAt": "{{ .EndsAt }}",
+      "dashboardURL": "{{ .DashboardURL }}",
+      "panelURL": "{{ .PanelURL }}",
+      "silenceURL": "{{ .SilenceURL }}"
+    }
+  {{ end }}
+  ],
+  "status": "{{ .Status }}",
+  "groupKey": "{{ .GroupKey }}",
+  "title": "{{ if eq .Status \"firing\" }}🔥 告警触发{{ else }}✅ 告警恢复{{ end }}: {{ .CommonLabels.alertname }}"
+}
+```
+
+3. 如果你的监控数据中 `instance` 标签有特殊名称，比如 `node`、`host` 或其他名称，需要在上述模板中适当调整。例如上面的模板中就添加了对 `node` 标签的支持：
+
+```
+"instance": "{{ if .Labels.instance }}{{ .Labels.instance }}{{ else }}{{ index .Labels \"node\" }}{{ end }}",
+```
 
 ## 示例效果
 

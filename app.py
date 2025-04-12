@@ -26,7 +26,11 @@ def format_time(time_str):
         dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except:
-        return time_str
+        try:
+            dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%SZ")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            return time_str
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -75,6 +79,31 @@ def send_to_feishu(alert_data):
     except Exception as e:
         logger.exception(f"发送告警到飞书时发生错误: {str(e)}")
 
+def get_instance_info(alert_labels):
+    """从多种可能的标签中获取实例信息"""
+    # 按优先级尝试不同的标签
+    for label in ['instance', 'node', 'host', 'method', 'job']:
+        if label in alert_labels and alert_labels[label]:
+            return alert_labels[label]
+    
+    # 如果找不到常见的标签，尝试组合非空标签值作为实例标识
+    non_empty_labels = {k: v for k, v in alert_labels.items() 
+                       if v and k not in ['alertname', 'severity']}
+    
+    if non_empty_labels:
+        return ", ".join([f"{k}={v}" for k, v in non_empty_labels.items()])
+    
+    return "未知"
+
+def is_valid_url(url):
+    """检查URL是否有效"""
+    if not url:
+        return False
+    if url == "":
+        return False
+    # 简单检查是否是一个网址格式
+    return url.startswith(('http://', 'https://'))
+
 def create_feishu_card(status, title, alerts, alert_data):
     """创建飞书卡片"""
     status_color = ALERT_COLORS.get(status.lower(), "grey")
@@ -108,6 +137,9 @@ def create_feishu_card(status, title, alerts, alert_data):
         alert_labels = alert.get('labels', {})
         alert_annotations = alert.get('annotations', {})
         
+        # 获取实例信息
+        instance_info = get_instance_info(alert_labels)
+        
         # 告警基本信息
         card["elements"].append({
             "tag": "div",
@@ -123,7 +155,7 @@ def create_feishu_card(status, title, alerts, alert_data):
                     "is_short": True,
                     "text": {
                         "tag": "lark_md",
-                        "content": f"**实例**\n{alert_labels.get('instance', '未知')}"
+                        "content": f"**实例**\n{instance_info}"
                     }
                 }
             ]
@@ -142,6 +174,16 @@ def create_feishu_card(status, title, alerts, alert_data):
                 "text": {
                     "tag": "lark_md",
                     "content": content.strip()
+                }
+            })
+        
+        # 添加值信息（如果有）
+        if 'valueString' in alert:
+            card["elements"].append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**值**: {alert.get('valueString', '')}"
                 }
             })
         
@@ -165,7 +207,13 @@ def create_feishu_card(status, title, alerts, alert_data):
         # 添加仪表盘和面板链接
         links = []
         
-        if 'dashboardURL' in alert:
+        dashboard_url = alert.get('dashboardURL', '')
+        panel_url = alert.get('panelURL', '')
+        silence_url = alert.get('silenceURL', '')
+        generator_url = alert.get('generatorURL', '')
+        
+        # 只添加有效的链接
+        if is_valid_url(dashboard_url):
             links.append({
                 "tag": "button",
                 "text": {
@@ -173,10 +221,10 @@ def create_feishu_card(status, title, alerts, alert_data):
                     "content": "查看仪表盘"
                 },
                 "type": "primary",
-                "url": alert.get('dashboardURL', '')
+                "url": dashboard_url
             })
             
-        if 'panelURL' in alert:
+        if is_valid_url(panel_url):
             links.append({
                 "tag": "button",
                 "text": {
@@ -184,10 +232,10 @@ def create_feishu_card(status, title, alerts, alert_data):
                     "content": "查看面板"
                 },
                 "type": "default",
-                "url": alert.get('panelURL', '')
+                "url": panel_url
             })
             
-        if 'silenceURL' in alert:
+        if is_valid_url(silence_url):
             links.append({
                 "tag": "button",
                 "text": {
@@ -195,7 +243,19 @@ def create_feishu_card(status, title, alerts, alert_data):
                     "content": "静默告警"
                 },
                 "type": "danger",
-                "url": alert.get('silenceURL', '')
+                "url": silence_url
+            })
+        
+        # 如果没有常规链接但有 generatorURL，添加查看告警详情按钮
+        if not links and is_valid_url(generator_url):
+            links.append({
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": "查看告警详情"
+                },
+                "type": "primary",
+                "url": generator_url
             })
         
         if links:
